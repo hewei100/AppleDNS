@@ -1,6 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals
+
+import json
+import os.path
+import sys
+from argparse import ArgumentParser
+from collections import namedtuple
+from datetime import datetime
+from math import isnan
+from operator import attrgetter
+
+from io import open
 
 formats = {
     'hosts': '{ip:<15} {domain}',
@@ -10,13 +21,11 @@ formats = {
 
 
 def check_requirements():
-    import sys
-
     def check_python_version():
-        if sys.hexversion >= 0x2000000 and sys.hexversion <= 0x2070000:
+        if 0x2000000 <= sys.hexversion <= 0x2070000:
             print('your "python" lower than 2.7.0 upgrade.')
             return False
-        if sys.hexversion >= 0x3000000 and sys.hexversion <= 0x3040000:
+        if 0x3000000 <= sys.hexversion <= 0x3040000:
             print('your "python" lower than 3.4.0 upgrade.')
             return False
         return True
@@ -24,38 +33,44 @@ def check_requirements():
     return check_python_version()
 
 
-def find_fast_ip(ips):
-    from collections import defaultdict
-    table = defaultdict(list)
-    for item in sum(ips.values(), []):
-        table[item['ip']].append(item['delta'])
-    table = map(
-        lambda item: (item[0], sum(item[1]) / len(item[1])),
-        table.items()
-    )
-    table = sorted(table, key=lambda item: item[1])
-    if len(table):
-        ip, rt = table[0]
-        return ip
+def find_fast_ip(ipset):
+    Item = namedtuple('Item', ['tag', 'ip', 'avg_rtt'])
+
+    def handle_delta(items):
+        tag, delta_map = items
+
+        def handle(item):
+            ip, delta = item
+            delta = list(item for item in delta if item != None)
+            if delta:
+                return Item(tag, ip, sum(delta) / float(len(delta)))
+            return Item(tag, ip, float('NaN'))
+
+        return list(map(handle, delta_map.items()))
+
+    def handle_sorted():
+        data = sum(list(map(handle_delta, ipset.items())), [])
+        return sorted(data, key=attrgetter('avg_rtt'))
+
+    iptable = handle_sorted()
+    return iptable[0] if iptable else None
 
 
 def export(payload, target):
     if not payload:
         return
+    print('# Build Date: %s (UTC)' % datetime.utcnow().isoformat())
     for service in sorted(payload, key=lambda item: item['title']):
-        fast_ip = find_fast_ip(service['ips'])
-        print('# %(title)s' % service)
+        tag, ip, avg_rtt = find_fast_ip(service['ips'])
+        if isnan(avg_rtt):
+            continue
+        print('# %s [%s] (Avg RTT: %.3fms)' % (service['title'], tag, avg_rtt))
         for domain in sorted(service['domains'], key=len):
-            template = '%s'
-            if not fast_ip:
-                template = '# %s'
-            print(template % formats[target].format(domain=domain, ip=fast_ip))
+            template = '%s' if ip else '# %s'
+            print(template % formats[target].format(domain=domain, ip=ip))
 
 
 def load_payload():
-    import json
-    import os.path
-    from io import open
     target_filename = 'apple-cdn-speed.report'
     if os.path.exists(target_filename):
         return json.load(open(target_filename, encoding='UTF-8'))
@@ -63,14 +78,17 @@ def load_payload():
 
 
 def main():
-    from argparse import ArgumentParser
     parser = ArgumentParser()
     parser.add_argument(
         'target',
         help='output target',
-        default='surge',
         choices=sorted(formats.keys(), key=len)
     )
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        sys.exit(1)
+
     args = parser.parse_args()
 
     export(load_payload(), args.target)
